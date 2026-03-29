@@ -1,3 +1,4 @@
+import re
 import time
 from uuid import UUID, uuid4
 
@@ -27,6 +28,7 @@ SECRET_KEY = "dev-super-secret-key"
 SESSION_COOKIE_MAX_AGE = 300
 SESSION_REFRESH_AFTER = 180
 signer = Signer(SECRET_KEY)
+ACCEPT_LANGUAGE_RE = re.compile(r"^[A-Za-z]{2,3}(?:-[A-Za-z]{2})?(?:,\s*[A-Za-z]{2,3}(?:-[A-Za-z]{2})?(?:;q=(?:0(?:\.\d{1,3})?|1(?:\.0{1,3})?))?)*$")
 
 
 def build_session_token(user_id: str, last_activity_ts: int) -> str:
@@ -198,3 +200,27 @@ async def get_profile(response: Response, session_token: str | None = Cookie(def
 async def get_user(response: Response, session_token: str | None = Cookie(default=None)):
     "Совместимый alias для /profile."
     return await get_profile(response, session_token)
+
+
+@app.get("/headers")
+async def get_headers(request: Request):
+    "Возвращает значения User-Agent и Accept-Language из запроса."
+    user_agent = request.headers.get("User-Agent")
+    accept_language = request.headers.get("Accept-Language")
+
+    if not user_agent or not accept_language:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Required headers are missing",
+        )
+
+    if ACCEPT_LANGUAGE_RE.fullmatch(accept_language) is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid Accept-Language format",
+        )
+
+    return {
+        "User-Agent": user_agent,
+        "Accept-Language": accept_language,
+    }
