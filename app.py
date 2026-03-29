@@ -1,7 +1,6 @@
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from fastapi import (
-    Body,
     Cookie,
     FastAPI,
     HTTPException,
@@ -11,8 +10,9 @@ from fastapi import (
     status,
 )
 from fastapi.responses import JSONResponse
+from itsdangerous import BadSignature, Signer
 
-from models import LoginRequest, UserCreate
+from models import UserCreate
 from products import sample_products
 
 app = FastAPI()
@@ -22,6 +22,9 @@ VALID_USERS = {
     "user123": "password123",
 }
 SESSION_STORE: dict[str, str] = {}
+SECRET_KEY = "dev-super-secret-key"
+SESSION_COOKIE_MAX_AGE = 3600
+signer = Signer(SECRET_KEY)
 
 
 @app.post("/create_user")
@@ -64,15 +67,18 @@ async def search_products(
 async def login(
     request: Request,
     response: Response,
-    login_json: LoginRequest | None = Body(default=None),
 ):
     "Ручка логина. Поддерживает JSON и form-data/x-www-form-urlencoded."
     username: str | None = None
     password: str | None = None
 
-    if login_json is not None:
-        username = login_json.username
-        password = login_json.password
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        payload = await request.json()
+        raw_username = payload.get("username") if isinstance(payload, dict) else None
+        raw_password = payload.get("password") if isinstance(payload, dict) else None
+        username = raw_username if isinstance(raw_username, str) else None
+        password = raw_password if isinstance(raw_password, str) else None
     else:
         form_data = await request.form()
         raw_username = form_data.get("username")
@@ -86,31 +92,56 @@ async def login(
             detail="Invalid credentials",
         )
 
-    session_token = str(uuid4())
-    SESSION_STORE[session_token] = username
+    user_id = str(uuid4())
+    session_token = signer.sign(user_id.encode("utf-8")).decode("utf-8")
+    SESSION_STORE[user_id] = username
     response.set_cookie(
         key="session_token",
         value=session_token,
         httponly=True,
         secure=False,
         samesite="lax",
+        max_age=SESSION_COOKIE_MAX_AGE,
     )
 
     return {"message": "Login successful"}
 
 
-@app.get("/user")
-async def get_user_profile(session_token: str | None = Cookie(default=None)):
-    "Защищенная ручка профиля пользователя по cookie session_token."
-    if session_token is None or session_token not in SESSION_STORE:
+@app.get("/profile")
+async def get_profile(session_token: str | None = Cookie(default=None)):
+    "Защищенная ручка профиля с проверкой подписи cookie session_token."
+    if session_token is None:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
             content={"message": "Unauthorized"},
         )
 
-    username = SESSION_STORE[session_token]
+    try:
+        user_id = signer.unsign(session_token.encode("utf-8")).decode("utf-8")
+    except BadSignature:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"message": "Unauthorized"},
+        )
+
+    try:
+        UUID(user_id)
+    except ValueError:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"message": "Unauthorized"},
+        )
+
+    if user_id not in SESSION_STORE:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"message": "Unauthorized"},
+        )
+
+    username = SESSION_STORE[user_id]
     return {
+        "user_id": user_id,
         "username": username,
         "full_name": "Demo User",
-        "auth_method": "cookie",
+        "auth_method": "signed_cookie",
     }
