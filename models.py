@@ -7,3 +7,7 @@ class UserCreate(BaseModel):
     age: int | None = Field(default=None, ge=0)
     is_subscribed: bool | None = None
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+
