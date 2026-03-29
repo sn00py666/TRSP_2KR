@@ -1,3 +1,4 @@
+import time
 from uuid import UUID, uuid4
 
 from fastapi import (
@@ -23,8 +24,35 @@ VALID_USERS = {
 }
 SESSION_STORE: dict[str, str] = {}
 SECRET_KEY = "dev-super-secret-key"
-SESSION_COOKIE_MAX_AGE = 3600
+SESSION_COOKIE_MAX_AGE = 300
+SESSION_REFRESH_AFTER = 180
 signer = Signer(SECRET_KEY)
+
+
+def build_session_token(user_id: str, last_activity_ts: int) -> str:
+    payload = f"{user_id}.{last_activity_ts}"
+    return signer.sign(payload.encode("utf-8")).decode("utf-8")
+
+
+def parse_session_token(session_token: str) -> tuple[str, int] | None:
+    try:
+        payload = signer.unsign(session_token.encode("utf-8")).decode("utf-8")
+    except BadSignature:
+        return None
+
+    parts = payload.split(".")
+    if len(parts) != 2:
+        return None
+
+    user_id, ts_str = parts
+
+    try:
+        UUID(user_id)
+        last_activity_ts = int(ts_str)
+    except ValueError:
+        return None
+
+    return user_id, last_activity_ts
 
 
 @app.post("/create_user")
@@ -93,7 +121,8 @@ async def login(
         )
 
     user_id = str(uuid4())
-    session_token = signer.sign(user_id.encode("utf-8")).decode("utf-8")
+    now_ts = int(time.time())
+    session_token = build_session_token(user_id, now_ts)
     SESSION_STORE[user_id] = username
     response.set_cookie(
         key="session_token",
@@ -108,34 +137,52 @@ async def login(
 
 
 @app.get("/profile")
-async def get_profile(session_token: str | None = Cookie(default=None)):
+async def get_profile(response: Response, session_token: str | None = Cookie(default=None)):
     "Защищенная ручка профиля с проверкой подписи cookie session_token."
     if session_token is None:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"message": "Unauthorized"},
+            content={"message": "Session expired"},
         )
 
-    try:
-        user_id = signer.unsign(session_token.encode("utf-8")).decode("utf-8")
-    except BadSignature:
+    parsed_token = parse_session_token(session_token)
+    if parsed_token is None:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"message": "Unauthorized"},
+            content={"message": "Invalid session"},
         )
 
-    try:
-        UUID(user_id)
-    except ValueError:
+    user_id, last_activity_ts = parsed_token
+    now_ts = int(time.time())
+
+    if last_activity_ts > now_ts:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"message": "Unauthorized"},
+            content={"message": "Invalid session"},
         )
 
     if user_id not in SESSION_STORE:
         return JSONResponse(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            content={"message": "Unauthorized"},
+            content={"message": "Session expired"},
+        )
+
+    elapsed = now_ts - last_activity_ts
+    if elapsed >= SESSION_COOKIE_MAX_AGE:
+        return JSONResponse(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            content={"message": "Session expired"},
+        )
+
+    if SESSION_REFRESH_AFTER <= elapsed < SESSION_COOKIE_MAX_AGE:
+        refreshed_token = build_session_token(user_id, now_ts)
+        response.set_cookie(
+            key="session_token",
+            value=refreshed_token,
+            httponly=True,
+            secure=False,
+            samesite="lax",
+            max_age=SESSION_COOKIE_MAX_AGE,
         )
 
     username = SESSION_STORE[user_id]
@@ -145,3 +192,9 @@ async def get_profile(session_token: str | None = Cookie(default=None)):
         "full_name": "Demo User",
         "auth_method": "signed_cookie",
     }
+
+
+@app.get("/user")
+async def get_user(response: Response, session_token: str | None = Cookie(default=None)):
+    "Совместимый alias для /profile."
+    return await get_profile(response, session_token)
